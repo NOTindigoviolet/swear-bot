@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 bot = commands.Bot(command_prefix='s!')
-vocab = ['fuck', 'bitch', 'cunt', 'shit', 'ass', 'nigger', 'nigga', 'nibba', 'faggot']
+vocab = ['fuck', 'bitch', 'cunt', 'shit', 'ass', 'nigger', 'nigga', 'nibba', 'faggot'] #can be configurable
 data = pd.DataFrame(columns=['content', 'time', 'author'])
 
 @bot.event
@@ -44,7 +44,7 @@ async def scan(ctx, arg=None):
                                             'time': msg.created_at,
                                             'author': msg.author.name}, ignore_index=True)   
                 
-    file_location = "C:\\Users\\agust\\Desktop\\Golden_Folden\\Programming\\Python\\SwearBot\\data.csv" # Set the string to where you want the file to be saved to
+    file_location = "" # Set the string to where you want the file to be saved to
     data.to_csv(file_location)
     
     await ctx.send('Scan complete')
