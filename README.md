@@ -69,7 +69,7 @@ All commands are slash commands.
 -   Saves all collected messages to `data.csv`.
 -   This command can take a long time to run on very large servers.
 
-### `\analyse`
+### `/analyse`
 **Owner-only.** Compiles the word usage statistics for all users.
 
 ### `/leaderboard [category]`
@@ -78,9 +78,3 @@ Displays the word usage leaderboards.
     -   If left empty, it shows the leaderboard for the **total** count of all tracked words.
     -   If you provide a specific word (e.g., `word1`), it shows the leaderboard for just that word.
     -   If you use `breakdown`, it shows a detailed table with counts for every user and every word.
-
-### `/hello`
-A simple test command to check if the bot is responsive.
-
-### `/say [thing_to_say]`
-Makes the bot repeat a message
