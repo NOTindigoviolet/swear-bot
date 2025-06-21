@@ -45,7 +45,8 @@ async def scan_channel(channel: discord.TextChannel):
                 messages.append({
                     'content': msg.content,
                     'time': msg.created_at,
-                    'author': msg.author.name
+                    'author_id': msg.author.id,
+                    'author_name': msg.author.name
                 })
         print(f"Finished scan for #{channel.name}. Found {len(messages)} messages.")
         return messages
@@ -112,6 +113,7 @@ async def analyse(interaction: discord.Interaction):
             return
         
         await interaction.edit_original_response(content=f"Filtering {len(analysis_data)} messages...")
+        
         analysis_data['content'] = analysis_data['content'].astype(str).str.lower()
         url_mask = analysis_data['content'].str.contains(r'https?://\S+', regex=True)
         command_prefixes = ('!', '?', '.', '/', '$', '%', '^', '&', '*', '-', 's!', '>')
@@ -124,42 +126,38 @@ async def analyse(interaction: discord.Interaction):
         if filtered_data.empty:
             await interaction.edit_original_response(content='No valid messages remaining after filtering. Analysis complete.')
             new = pd.DataFrame(columns=vocab)
-            new.index.name = "Name"
+            new.index.name = "Author ID"
             new.to_csv("leaderboard_data.csv")
             return
+        
+        author_names = filtered_data.groupby('author_id')['author_name'].last()
 
-        word_counts = pd.DataFrame(0, index=filtered_data['author'].unique(), columns=vocab)
+        word_counts = pd.DataFrame(0, index=author_names.index, columns=vocab)
         if vocab: 
             total_words = len(vocab)
             for i, word in enumerate(vocab):
                 if (i + 1) % 5 == 0 or (i + 1) == total_words:
                     progress_percent = (i + 1) / total_words * 100
                     await interaction.edit_original_response(content=f"Analysing word counts: [{i+1}/{total_words}] ({progress_percent:.1f}%)")
-                word_counts[word] = filtered_data.groupby('author')['content'].apply(lambda x: x.str.count(r'\b' + re.escape(word) + r'\b').sum())
+                word_counts[word] = filtered_data.groupby('author_id')['content'].apply(lambda x: x.str.count(r'\b' + re.escape(word) + r'\b').sum())
 
         await interaction.edit_original_response(content="Calculating totals and percentages...")
         
-        # Calculate total messages per user
-        total_messages = filtered_data.groupby('author').size().rename('Total Messages')
-
-        # Calculate total words per user
-        total_words = filtered_data.groupby('author')['content'].apply(lambda x: x.str.split().str.len().sum()).rename('Total Words')
-
-        # Calculate total swears per user
+        total_messages = filtered_data.groupby('author_id').size().rename('Total Messages')
+        total_words = filtered_data.groupby('author_id')['content'].apply(lambda x: x.str.split().str.len().sum()).rename('Total Words')
         total_swears = word_counts.sum(axis=1).rename('Total Swears')
 
-        new = pd.concat([word_counts, total_messages, total_words, total_swears], axis=1)
+        new = pd.concat([author_names, word_counts, total_messages, total_words, total_swears], axis=1)
         new.fillna(0, inplace=True)
         
         new['Swear Percentage'] = (new['Total Swears'] / (new['Total Words'] + 1e-9) * 100).fillna(0)
 
-        # Convert count columns to integers
         count_cols = vocab + ['Total Messages', 'Total Words', 'Total Swears']
         for col in count_cols:
             if col in new.columns:
                 new[col] = new[col].astype(int)
         
-        new.index.name = "Name"
+        new.index.name = "Author ID"
         leaderboard_cache_file = "leaderboard_data.csv"
         new.to_csv(leaderboard_cache_file)
         
@@ -181,15 +179,14 @@ async def on_scan_error(interaction: discord.Interaction, error: app_commands.Ap
         await interaction.response.send_message('You must be the bot owner to use this command.', ephemeral=True)
 
 @bot.tree.command(name="leaderboard")
-@app_commands.describe(arg="The category for the leaderboard (e.g., a specific word, 'breakdown', 'percentage', or leave empty for total).")
+@app_commands.describe(arg="The category for the leaderboard (e.g., a specific word, user name/mention, 'breakdown', 'percentage', or leave empty for total).")
 async def leaderboard(interaction: discord.Interaction, arg: str = None):
     global new
 
-    # If 'new' dataframe is empty, try to load from the cache file.
     if new.empty:
         try:
             print("In-memory leaderboard is empty, loading from cache...")
-            new = pd.read_csv("leaderboard_data.csv", index_col="Name")
+            new = pd.read_csv("leaderboard_data.csv", index_col="Author ID")
             print("Successfully loaded leaderboard data from cache.")
         except FileNotFoundError:
             await interaction.response.send_message('No analysed data found. Please run `/analyse` first.', ephemeral=True)
@@ -199,105 +196,111 @@ async def leaderboard(interaction: discord.Interaction, arg: str = None):
             await interaction.response.send_message('Could not load leaderboard data. Please run `/analyse` again.', ephemeral=True)
             return
 
-    if arg:
-        arg = arg.lower()
-        if arg == "breakdown":
-            # Create a copy for display to avoid modifying the global 'new' DataFrame
-            display_df = new.copy()
-            # Exclude columns that are all zeros
-            display_df = display_df.loc[:, (display_df != 0).any(axis=0)]
-
-            if display_df.empty or not vocab:
-                await interaction.response.send_message("The leaderboard is currently empty.", ephemeral=True)
-                return
-
-            # Calculate total based only on vocab words
-            display_df['Total'] = display_df[vocab].sum(axis=1)
-            display_df.sort_values(by='Total', ascending=False, inplace=True)
-            display_df = display_df[display_df['Total'] > 0]
-
-            if display_df.empty:
-                await interaction.response.send_message("The leaderboard is currently empty.", ephemeral=True)
-                return
-
-            embed = discord.Embed(title="Leaderboard Breakdown", description="Top users and their most used words.", color=discord.Color.purple())
-
-            # Limit to top 10 users for a cleaner look and to avoid hitting limits
-            for name, row in display_df.head(10).iterrows():
-                total = int(row['Total'])
-                
-                user_words = row[vocab].sort_values(ascending=False)
-                top_words = user_words[user_words > 0]
-                
-                if not top_words.empty:
-                    breakdown_text = "\n".join([f"- {word}: **{int(count)}**" for word, count in top_words.items()])
-                else:
-                    breakdown_text = "No specific tracked words used."
-
-                embed.add_field(
-                    name=f"{name} (Total: {total})",
-                    value=breakdown_text,
-                    inline=False
-                )
-
-            await interaction.response.send_message(embed=embed)
-        
-        elif arg == "percentage":
-            # Create a leaderboard for swear-to-word ratio
-            if 'Swear Percentage' not in new.columns or 'Total Swears' not in new.columns or 'Total Words' not in new.columns:
-                await interaction.response.send_message("Percentage data not available. Please run `/analyse` again.", ephemeral=True)
-                return
-
-            leader = new[['Swear Percentage', 'Total Swears', 'Total Words']].copy().sort_values(by='Swear Percentage', ascending=False)
-            leader = leader[leader['Swear Percentage'] > 0]
-
-            if leader.empty:
-                await interaction.response.send_message("No one has a swear percentage yet.", ephemeral=True)
-                return
-
-            embed = discord.Embed(title="Swear-to-Word Ratio Leaderboard", description="Percent of swears to total words.", color=discord.Color.orange())
-            for rank, (name, row) in enumerate(leader.head(25).iterrows(), 1):
-                percentage = row['Swear Percentage']
-                swear_count = int(row['Total Swears'])
-                total_word_count = int(row['Total Words'])
-                embed.add_field(
-                    name=f"#{rank} {name}",
-                    value=f"**{percentage:.2f}%** ({swear_count} swears / {total_word_count} words)",
-                    inline=False
-                )
-            await interaction.response.send_message(embed=embed)
-        else:
-            if arg not in vocab:
-                await interaction.response.send_message(f"Sorry, '{arg}' is not a tracked word.", ephemeral=True)
-                return
-            
-            # Create a leaderboard for the specific word
-            leader = new[[arg]].copy().sort_values(by=arg, ascending=False)
-            leader = leader[leader[arg] > 0] # Only show users with a count > 0
-
-            if leader.empty:
-                await interaction.response.send_message(f"No one has said '{arg}' yet.", ephemeral=True)
-                return
-
-            embed = discord.Embed(title=f"{arg.capitalize()} Leaderboard", color=discord.Color.green())
-            for rank, (name, row) in enumerate(leader.head(25).iterrows(), 1):
-                count = int(row[arg])
-                embed.add_field(name=f"#{rank} {name}", value=f"**{count}** times", inline=False)
-
-            await interaction.response.send_message(embed=embed)
-    else:
-        # Create a total leaderboard based only on vocab words
+    # Total Leaderboard 
+    if not arg:
         total_leaderboard = new[vocab].sum(axis=1).sort_values(ascending=False)
-        total_leaderboard = total_leaderboard[total_leaderboard > 0] # Only show users with a count > 0
+        total_leaderboard = total_leaderboard[total_leaderboard > 0]
         
         if total_leaderboard.empty:
             await interaction.response.send_message("The leaderboard is currently empty.", ephemeral=True)
             return
 
         embed = discord.Embed(title="Total Swears Leaderboard", color=discord.Color.blue())
-        for rank, (name, total) in enumerate(total_leaderboard.head(25).items(), 1):
-            embed.add_field(name=f"#{rank} {name}", value=f"**{int(total)}** total swears", inline=False)
-
+        for user_id, total in total_leaderboard.head(25).items():
+            name = new.loc[user_id, 'author_name']
+            embed.add_field(name=f"#{len(embed.fields) + 1} {name}", value=f"**{int(total)}** total swears", inline=False)
         await interaction.response.send_message(embed=embed)
+        return
+
+    arg_lower = arg.lower()
+
+    if arg_lower == "breakdown":
+        display_df = new.copy()
+        display_df = display_df.loc[:, (display_df != 0).any(axis=0)]
+        if display_df.empty or not vocab:
+            await interaction.response.send_message("The leaderboard is currently empty.", ephemeral=True)
+            return
+        display_df['Total'] = display_df[vocab].sum(axis=1)
+        display_df.sort_values(by='Total', ascending=False, inplace=True)
+        display_df = display_df[display_df['Total'] > 0]
+        if display_df.empty:
+            await interaction.response.send_message("The leaderboard is currently empty.", ephemeral=True)
+            return
+        embed = discord.Embed(title="Leaderboard Breakdown", description="Top users and their most used words.", color=discord.Color.purple())
+        for user_id, row in display_df.head(10).iterrows():
+            name = row['author_name']
+            total = int(row['Total'])
+            user_words = row[vocab].sort_values(ascending=False)
+            top_words = user_words[user_words > 0]
+            breakdown_text = "\n".join([f"- {word}: **{int(count)}**" for word, count in top_words.items()]) if not top_words.empty else "No specific tracked words used."
+            embed.add_field(name=f"{name} (Total: {total})", value=breakdown_text, inline=False)
+        await interaction.response.send_message(embed=embed)
+        return
+
+    if arg_lower == "percentage":
+        if 'Swear Percentage' not in new.columns:
+            await interaction.response.send_message("Percentage data not available. Please run `/analyse` again.", ephemeral=True)
+            return
+        leader = new[['author_name', 'Swear Percentage', 'Total Swears', 'Total Words']].copy().sort_values(by='Swear Percentage', ascending=False)
+        leader = leader[leader['Swear Percentage'] > 0]
+        if leader.empty:
+            await interaction.response.send_message("No one has a swear percentage yet.", ephemeral=True)
+            return
+        embed = discord.Embed(title="Swear-to-Word Ratio Leaderboard", description="Percentage of total words that are tracked swears.", color=discord.Color.orange())
+        for _, row in leader.head(25).iterrows():
+            name = row['author_name']
+            percentage = row['Swear Percentage']
+            swear_count = int(row['Total Swears'])
+            total_word_count = int(row['Total Words'])
+            embed.add_field(name=f"#{len(embed.fields) + 1} {name}", value=f"**{percentage:.2f}%** ({swear_count} swears / {total_word_count} words)", inline=False)
+        await interaction.response.send_message(embed=embed)
+        return
+
+    if arg_lower in vocab:
+        leader = new[['author_name', arg_lower]].copy().sort_values(by=arg_lower, ascending=False)
+        leader = leader[leader[arg_lower] > 0]
+        if leader.empty:
+            await interaction.response.send_message(f"No one has said '{arg}' yet.", ephemeral=True)
+            return
+        embed = discord.Embed(title=f"{arg.capitalize()} Leaderboard", color=discord.Color.green())
+        for _, row in leader.head(25).iterrows():
+            name = row['author_name']
+            count = int(row[arg_lower])
+            embed.add_field(name=f"#{len(embed.fields) + 1} {name}", value=f"**{count}** times", inline=False)
+        await interaction.response.send_message(embed=embed)
+        return
+
+    user_data = None
+    # Check for mention or raw ID
+    match = re.match(r'<@!?(\d+)>$', arg)
+    user_id_to_find = int(match.group(1)) if match else (int(arg) if arg.isdigit() else None)
+    if user_id_to_find:
+        if user_id_to_find in new.index:
+            user_data = new.loc[user_id_to_find]
+    else:
+        results = new[new['author_name'].str.lower() == arg_lower]
+        if not results.empty:
+            user_data = results.iloc[0]
+
+    if user_data is not None:
+        user_name = user_data['author_name']
+        total_swears = int(user_data.get('Total Swears', 0))
+        total_words = int(user_data.get('Total Words', 0))
+        percentage = user_data.get('Swear Percentage', 0.0)
+        user_word_counts = user_data[vocab].sort_values(ascending=False)
+        user_word_counts = user_word_counts[user_word_counts > 0]
+        
+        embed = discord.Embed(title=f"Stats for {user_name}", color=discord.Color.teal())
+        embed.add_field(name="Total Swears", value=f"**{total_swears}**", inline=True)
+        embed.add_field(name="Total Words", value=f"**{total_words}**", inline=True)
+        embed.add_field(name="Swear Ratio", value=f"**{percentage:.2f}%**", inline=True)
+        if not user_word_counts.empty:
+            breakdown_text = "\n".join([f"- {word}: **{int(count)}**" for word, count in user_word_counts.items()])
+            embed.add_field(name="Word Breakdown", value=breakdown_text, inline=False)
+        else:
+            embed.add_field(name="Word Breakdown", value="No tracked words used.", inline=False)
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(f"Sorry, '{arg}' is not a valid category or user.", ephemeral=True)
 
 bot.run(TOKEN)
