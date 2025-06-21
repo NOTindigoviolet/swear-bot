@@ -6,6 +6,7 @@ import pandas as pd
 from discord.ext import commands
 from dotenv import load_dotenv
 import asyncio
+import re
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -90,65 +91,84 @@ async def analyse(interaction: discord.Interaction):
     """Processes the scanned data to count word usage per user and caches the result."""
     global data, new
 
-    analysis_data = pd.DataFrame()
-    if not data.empty:
-        analysis_data = data.copy()
-    else:
-        try:
-            print("In-memory data is empty, trying to load from data.csv...")
-            analysis_data = pd.read_csv("data.csv")
-            print("Successfully loaded data from data.csv")
-        except FileNotFoundError:
-            await interaction.response.send_message('No data found. Please run `/scan` first.', ephemeral=True)
-            return
-
-    if analysis_data.empty:
-        await interaction.response.send_message('Scanned data is empty. Nothing to analyse.', ephemeral=True)
-        return
-    
     await interaction.response.defer(thinking=True, ephemeral=True)
 
-    # --- Filtering Logic ---
-    print(f"Starting analysis on {len(analysis_data)} messages.")
-    analysis_data['content'] = analysis_data['content'].astype(str).str.lower()
+    try:
+        await interaction.edit_original_response(content="Loading scanned data...")
+        analysis_data = pd.DataFrame()
+        if not data.empty:
+            analysis_data = data.copy()
+        else:
+            try:
+                print("In-memory data is empty, trying to load from data.csv...")
+                analysis_data = pd.read_csv("data.csv")
+                print("Successfully loaded data from data.csv")
+            except FileNotFoundError:
+                await interaction.edit_original_response(content='No data found. Please run `/scan` first.')
+                return
 
-    # Create a mask to identify and exclude messages containing URLs.
-    url_mask = analysis_data['content'].str.contains(r'https?://\S+', regex=True)
+        if analysis_data.empty:
+            await interaction.edit_original_response(content='Scanned data is empty. Nothing to analyse.')
+            return
+        
+        await interaction.edit_original_response(content=f"Filtering {len(analysis_data)} messages...")
+        analysis_data['content'] = analysis_data['content'].astype(str).str.lower()
+        url_mask = analysis_data['content'].str.contains(r'https?://\S+', regex=True)
+        command_prefixes = ('!', '?', '.', '/', '$', '%', '^', '&', '*', '-', 's!', '>')
+        command_mask = analysis_data['content'].str.strip().str.startswith(command_prefixes)
+        exclude_mask = url_mask | command_mask
+        filtered_data = analysis_data[~exclude_mask]
+        
+        await interaction.edit_original_response(content=f"Filtered down to {len(filtered_data)} messages. Starting analysis...")
 
-    # Create a mask to identify and exclude messages that are likely bot commands.
-    command_prefixes = ('!', '?', '.', '/', '$', '%', '^', '&', '*', '-', 's!', '>')
-    command_mask = analysis_data['content'].str.strip().str.startswith(command_prefixes)
+        if filtered_data.empty:
+            await interaction.edit_original_response(content='No valid messages remaining after filtering. Analysis complete.')
+            new = pd.DataFrame(columns=vocab)
+            new.index.name = "Name"
+            new.to_csv("leaderboard_data.csv")
+            return
 
-    # Combine masks to find all messages that should be excluded.
-    exclude_mask = url_mask | command_mask
-    
-    # Apply the filter to get the final, clean dataset for analysis.
-    filtered_data = analysis_data[~exclude_mask]
-    
-    print(f"Filtered out {exclude_mask.sum()} messages (URLs or commands). Analysing {len(filtered_data)} messages.")
+        word_counts = pd.DataFrame(0, index=filtered_data['author'].unique(), columns=vocab)
+        if vocab: 
+            total_words = len(vocab)
+            for i, word in enumerate(vocab):
+                if (i + 1) % 5 == 0 or (i + 1) == total_words:
+                    progress_percent = (i + 1) / total_words * 100
+                    await interaction.edit_original_response(content=f"Analysing word counts: [{i+1}/{total_words}] ({progress_percent:.1f}%)")
+                word_counts[word] = filtered_data.groupby('author')['content'].apply(lambda x: x.str.count(r'\b' + re.escape(word) + r'\b').sum())
 
-    if filtered_data.empty:
-        await interaction.followup.send('No valid messages remaining after filtering. Analysis complete.', ephemeral=True)
-        new = pd.DataFrame(columns=vocab)
+        await interaction.edit_original_response(content="Calculating totals and percentages...")
+        
+        # Calculate total messages per user
+        total_messages = filtered_data.groupby('author').size().rename('Total Messages')
+
+        # Calculate total words per user
+        total_words = filtered_data.groupby('author')['content'].apply(lambda x: x.str.split().str.len().sum()).rename('Total Words')
+
+        # Calculate total swears per user
+        total_swears = word_counts.sum(axis=1).rename('Total Swears')
+
+        new = pd.concat([word_counts, total_messages, total_words, total_swears], axis=1)
+        new.fillna(0, inplace=True)
+        
+        new['Swear Percentage'] = (new['Total Swears'] / (new['Total Words'] + 1e-9) * 100).fillna(0)
+
+        # Convert count columns to integers
+        count_cols = vocab + ['Total Messages', 'Total Words', 'Total Swears']
+        for col in count_cols:
+            if col in new.columns:
+                new[col] = new[col].astype(int)
+        
         new.index.name = "Name"
-        new.to_csv("leaderboard_data.csv")
-        return
+        leaderboard_cache_file = "leaderboard_data.csv"
+        new.to_csv(leaderboard_cache_file)
+        
+        await interaction.edit_original_response(content='Analysis complete. Leaderboard is now up to date.')
 
-    unique_authors = filtered_data.author.unique()
-    new = pd.DataFrame(0, index=unique_authors, columns=vocab)
-    new.index.name = "Name"
-    
-    print("Compiling user statistics...")
-    for name, group in filtered_data.groupby('author'):
-        for word in vocab:
-            total_count = group['content'].str.count(word).sum()
-            new.loc[name, word] = total_count
-
-    leaderboard_cache_file = "leaderboard_data.csv"
-    new.to_csv(leaderboard_cache_file)
-    
-    print(f"Analysis complete. Leaderboard data saved to {leaderboard_cache_file}.")
-    await interaction.followup.send('Analysis complete. Leaderboard is now up to date.', ephemeral=True)
+    except Exception as e:
+        print(f"An error occurred during analysis: {e}")
+        if not interaction.is_response_sent():
+            await interaction.edit_original_response(content=f"An unexpected error occurred during analysis. Please check the console.")
 
 @analyse.error
 async def on_analyse_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -161,7 +181,7 @@ async def on_scan_error(interaction: discord.Interaction, error: app_commands.Ap
         await interaction.response.send_message('You must be the bot owner to use this command.', ephemeral=True)
 
 @bot.tree.command(name="leaderboard")
-@app_commands.describe(arg="The category for the leaderboard (e.g., a specific word, 'breakdown', or leave empty for total).")
+@app_commands.describe(arg="The category for the leaderboard (e.g., a specific word, 'breakdown', 'percentage', or leave empty for total).")
 async def leaderboard(interaction: discord.Interaction, arg: str = None):
     global new
 
@@ -187,11 +207,12 @@ async def leaderboard(interaction: discord.Interaction, arg: str = None):
             # Exclude columns that are all zeros
             display_df = display_df.loc[:, (display_df != 0).any(axis=0)]
 
-            if display_df.empty:
+            if display_df.empty or not vocab:
                 await interaction.response.send_message("The leaderboard is currently empty.", ephemeral=True)
                 return
 
-            display_df['Total'] = display_df.sum(axis=1)
+            # Calculate total based only on vocab words
+            display_df['Total'] = display_df[vocab].sum(axis=1)
             display_df.sort_values(by='Total', ascending=False, inplace=True)
             display_df = display_df[display_df['Total'] > 0]
 
@@ -205,7 +226,7 @@ async def leaderboard(interaction: discord.Interaction, arg: str = None):
             for name, row in display_df.head(10).iterrows():
                 total = int(row['Total'])
                 
-                user_words = row.drop('Total').sort_values(ascending=False)
+                user_words = row[vocab].sort_values(ascending=False)
                 top_words = user_words[user_words > 0]
                 
                 if not top_words.empty:
@@ -220,8 +241,33 @@ async def leaderboard(interaction: discord.Interaction, arg: str = None):
                 )
 
             await interaction.response.send_message(embed=embed)
+        
+        elif arg == "percentage":
+            # Create a leaderboard for swear-to-word ratio
+            if 'Swear Percentage' not in new.columns or 'Total Swears' not in new.columns or 'Total Words' not in new.columns:
+                await interaction.response.send_message("Percentage data not available. Please run `/analyse` again.", ephemeral=True)
+                return
+
+            leader = new[['Swear Percentage', 'Total Swears', 'Total Words']].copy().sort_values(by='Swear Percentage', ascending=False)
+            leader = leader[leader['Swear Percentage'] > 0]
+
+            if leader.empty:
+                await interaction.response.send_message("No one has a swear percentage yet.", ephemeral=True)
+                return
+
+            embed = discord.Embed(title="Swear-to-Word Ratio Leaderboard", description="Percent of swears to total words.", color=discord.Color.orange())
+            for rank, (name, row) in enumerate(leader.head(25).iterrows(), 1):
+                percentage = row['Swear Percentage']
+                swear_count = int(row['Total Swears'])
+                total_word_count = int(row['Total Words'])
+                embed.add_field(
+                    name=f"#{rank} {name}",
+                    value=f"**{percentage:.2f}%** ({swear_count} swears / {total_word_count} words)",
+                    inline=False
+                )
+            await interaction.response.send_message(embed=embed)
         else:
-            if arg not in new.columns:
+            if arg not in vocab:
                 await interaction.response.send_message(f"Sorry, '{arg}' is not a tracked word.", ephemeral=True)
                 return
             
@@ -234,15 +280,14 @@ async def leaderboard(interaction: discord.Interaction, arg: str = None):
                 return
 
             embed = discord.Embed(title=f"{arg.capitalize()} Leaderboard", color=discord.Color.green())
-            # Limit to top 25 to avoid embed field limit
             for rank, (name, row) in enumerate(leader.head(25).iterrows(), 1):
                 count = int(row[arg])
                 embed.add_field(name=f"#{rank} {name}", value=f"**{count}** times", inline=False)
 
             await interaction.response.send_message(embed=embed)
     else:
-        # Create a total leaderboard
-        total_leaderboard = new.sum(axis=1).sort_values(ascending=False)
+        # Create a total leaderboard based only on vocab words
+        total_leaderboard = new[vocab].sum(axis=1).sort_values(ascending=False)
         total_leaderboard = total_leaderboard[total_leaderboard > 0] # Only show users with a count > 0
         
         if total_leaderboard.empty:
@@ -250,7 +295,6 @@ async def leaderboard(interaction: discord.Interaction, arg: str = None):
             return
 
         embed = discord.Embed(title="Total Swears Leaderboard", color=discord.Color.blue())
-        # Limit to top 25 to avoid embed field limit
         for rank, (name, total) in enumerate(total_leaderboard.head(25).items(), 1):
             embed.add_field(name=f"#{rank} {name}", value=f"**{int(total)}** total swears", inline=False)
 
