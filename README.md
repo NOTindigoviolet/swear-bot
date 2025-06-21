@@ -77,4 +77,6 @@ Displays the word usage leaderboards.
 -   **`category` (Optional):**
     -   If left empty, it shows the leaderboard for the **total** count of all tracked words.
     -   If you provide a specific word (e.g., `word1`), it shows the leaderboard for just that word.
+    -   If you provide a specific user, it shows the breakdown for that user.
     -   If you use `breakdown`, it shows a detailed table with counts for every user and every word.
+    -   If you use `percentage`, it shows the leaderboard the for percent of swear words used to total words used.
