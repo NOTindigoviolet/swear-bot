@@ -139,7 +139,7 @@ async def analyse(interaction: discord.Interaction):
                 if (i + 1) % 5 == 0 or (i + 1) == total_words:
                     progress_percent = (i + 1) / total_words * 100
                     await interaction.edit_original_response(content=f"Analysing word counts: [{i+1}/{total_words}] ({progress_percent:.1f}%)")
-                word_counts[word] = filtered_data.groupby('author_id')['content'].apply(lambda x: x.str.count(r'\b' + re.escape(word) + r'\b').sum())
+                word_counts[word] = filtered_data.groupby('author_id')['content'].apply(lambda x: x.str.count(re.escape(word)).sum())
 
         await interaction.edit_original_response(content="Calculating totals and percentages...")
         
